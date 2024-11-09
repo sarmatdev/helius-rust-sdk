@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use helius::types::*;
 use helius::Helius;
 use solana_client::rpc_config::RpcSendTransactionConfig;
@@ -28,7 +30,7 @@ async fn main() {
 
     let create_config: CreateSmartTransactionConfig = CreateSmartTransactionConfig {
         instructions,
-        signers: vec![&from_keypair],
+        signers: vec![Arc::new(from_keypair)],
         lookup_tables: None,
         fee_payer: None,
     };
