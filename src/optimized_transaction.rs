@@ -21,6 +21,7 @@ use solana_sdk::{
     signature::{Signature, Signer},
     transaction::{Transaction, VersionedTransaction},
 };
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
 
@@ -40,7 +41,7 @@ impl Helius {
         instructions: Vec<Instruction>,
         payer: Pubkey,
         lookup_tables: Vec<AddressLookupTableAccount>,
-        signers: &[&dyn Signer],
+        signers: &[Arc<dyn Signer>],
     ) -> Result<Option<u64>> {
         // Set the compute budget limit
         let test_instructions: Vec<Instruction> = vec![ComputeBudgetInstruction::set_compute_unit_limit(1_400_000)]
@@ -120,7 +121,7 @@ impl Helius {
     /// An optimized `SmartTransaction` (i.e., `Transaction` or `VersionedTransaction`) and the `last_valid_block_height`
     pub async fn create_smart_transaction(
         &self,
-        config: &CreateSmartTransactionConfig<'_>,
+        config: &CreateSmartTransactionConfig,
     ) -> Result<(SmartTransaction, u64)> {
         if config.signers.is_empty() {
             return Err(HeliusError::InvalidInput(
@@ -130,6 +131,7 @@ impl Helius {
 
         let payer_pubkey: Pubkey = config
             .fee_payer
+            .as_ref()
             .map_or(config.signers[0].pubkey(), |signer| signer.pubkey());
         let (recent_blockhash, last_valid_block_hash) = self
             .connection()
@@ -160,10 +162,10 @@ impl Helius {
                 v0::Message::try_compile(&payer_pubkey, &config.instructions, lookup_tables, recent_blockhash)?;
             let versioned_message: VersionedMessage = VersionedMessage::V0(v0_message);
 
-            let all_signers = if let Some(fee_payer) = config.fee_payer {
-                let mut all_signers: Vec<&dyn Signer> = config.signers.clone();
+            let all_signers = if let Some(fee_payer) = config.fee_payer.as_ref() {
+                let mut all_signers: Vec<Arc<dyn Signer>> = config.signers.clone();
                 if !all_signers.iter().any(|signer| signer.pubkey() == fee_payer.pubkey()) {
-                    all_signers.push(fee_payer);
+                    all_signers.push(fee_payer.clone());
                 }
 
                 all_signers
@@ -186,8 +188,8 @@ impl Helius {
             let mut tx: Transaction = Transaction::new_with_payer(&config.instructions, Some(&payer_pubkey));
             tx.try_partial_sign(&config.signers, recent_blockhash)?;
 
-            if let Some(fee_payer) = config.fee_payer {
-                tx.try_partial_sign(&[fee_payer], recent_blockhash)?;
+            if let Some(fee_payer) = config.fee_payer.as_ref() {
+                tx.try_partial_sign(&[fee_payer.clone()], recent_blockhash)?;
             }
 
             legacy_transaction = Some(tx);
@@ -270,10 +272,10 @@ impl Helius {
                 v0::Message::try_compile(&payer_pubkey, &final_instructions, lookup_tables, recent_blockhash)?;
             let versioned_message: VersionedMessage = VersionedMessage::V0(v0_message);
 
-            let all_signers: Vec<&dyn Signer> = if let Some(fee_payer) = config.fee_payer {
+            let all_signers: Vec<Arc<dyn Signer>> = if let Some(fee_payer) = config.fee_payer.as_ref() {
                 let mut all_signers = config.signers.clone();
                 if !all_signers.iter().any(|signer| signer.pubkey() == fee_payer.pubkey()) {
-                    all_signers.push(fee_payer);
+                    all_signers.push(fee_payer.clone());
                 }
                 all_signers
             } else {
@@ -298,8 +300,8 @@ impl Helius {
             let mut tx: Transaction = Transaction::new_with_payer(&final_instructions, Some(&payer_pubkey));
             tx.try_partial_sign(&config.signers, recent_blockhash)?;
 
-            if let Some(fee_payer) = config.fee_payer {
-                tx.try_partial_sign(&[fee_payer], recent_blockhash)?;
+            if let Some(fee_payer) = config.fee_payer.as_ref() {
+                tx.try_partial_sign(&[fee_payer.clone()], recent_blockhash)?;
             }
 
             legacy_transaction = Some(tx);
@@ -319,7 +321,7 @@ impl Helius {
     ///
     /// # Returns
     /// The transaction signature, if successful
-    pub async fn send_smart_transaction(&self, config: SmartTransactionConfig<'_>) -> Result<Signature> {
+    pub async fn send_smart_transaction(&self, config: SmartTransactionConfig) -> Result<Signature> {
         let (transaction, last_valid_block_height) = self.create_smart_transaction(&config.create_config).await?;
 
         // Common logic for sending transactions
