@@ -9,6 +9,7 @@ use bincode::{serialize, ErrorKind};
 use reqwest::StatusCode;
 use solana_client::rpc_config::{RpcSendTransactionConfig, RpcSimulateTransactionConfig};
 use solana_client::rpc_response::{Response, RpcSimulateTransactionResult};
+use solana_sdk::signature::Keypair;
 use solana_sdk::{
     address_lookup_table::AddressLookupTableAccount,
     bs58::encode,
@@ -41,7 +42,7 @@ impl Helius {
         instructions: Vec<Instruction>,
         payer: Pubkey,
         lookup_tables: Vec<AddressLookupTableAccount>,
-        signers: &[Arc<dyn Signer>],
+        signers: &[Arc<Keypair>],
     ) -> Result<Option<u64>> {
         // Set the compute budget limit
         let test_instructions: Vec<Instruction> = vec![ComputeBudgetInstruction::set_compute_unit_limit(1_400_000)]
@@ -58,7 +59,8 @@ impl Helius {
         let versioned_message: VersionedMessage = VersionedMessage::V0(v0_message);
 
         // Create a signed VersionedTransaction
-        let transaction: VersionedTransaction = VersionedTransaction::try_new(versioned_message, signers)
+        let signers: [&dyn Signer; 1] = [&signers[0]];
+        let transaction: VersionedTransaction = VersionedTransaction::try_new(versioned_message, &signers)
             .map_err(|e| HeliusError::InvalidInput(format!("Signing error: {:?}", e)))?;
 
         // Simulate the transaction
@@ -151,49 +153,37 @@ impl Helius {
         }
 
         // Determine if we need to use a versioned transaction
-        let is_versioned: bool = config.lookup_tables.is_some();
         let mut legacy_transaction: Option<Transaction> = None;
         let mut versioned_transaction: Option<VersionedTransaction> = None;
 
         // Build the initial transaction based on whether lookup tables are present
-        if is_versioned {
-            let lookup_tables: &[AddressLookupTableAccount] = config.lookup_tables.as_deref().unwrap_or_default();
-            let v0_message: v0::Message =
-                v0::Message::try_compile(&payer_pubkey, &config.instructions, lookup_tables, recent_blockhash)?;
-            let versioned_message: VersionedMessage = VersionedMessage::V0(v0_message);
 
-            let all_signers = if let Some(fee_payer) = config.fee_payer.as_ref() {
-                let mut all_signers: Vec<Arc<dyn Signer>> = config.signers.clone();
-                if !all_signers.iter().any(|signer| signer.pubkey() == fee_payer.pubkey()) {
-                    all_signers.push(fee_payer.clone());
-                }
+        let lookup_tables: &[AddressLookupTableAccount] = config.lookup_tables.as_deref().unwrap_or_default();
+        let v0_message: v0::Message =
+            v0::Message::try_compile(&payer_pubkey, &config.instructions, lookup_tables, recent_blockhash)?;
+        let versioned_message: VersionedMessage = VersionedMessage::V0(v0_message);
 
-                all_signers
-            } else {
-                config.signers.clone()
-            };
-
-            // Sign the versioned transaction
-            let signatures: Vec<Signature> = all_signers
-                .iter()
-                .map(|signer| signer.try_sign_message(versioned_message.serialize().as_slice()))
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-
-            versioned_transaction = Some(VersionedTransaction {
-                signatures,
-                message: versioned_message,
-            });
-        } else {
-            // If no lookup tables are present, we build a regular transaction
-            let mut tx: Transaction = Transaction::new_with_payer(&config.instructions, Some(&payer_pubkey));
-            tx.try_partial_sign(&config.signers, recent_blockhash)?;
-
-            if let Some(fee_payer) = config.fee_payer.as_ref() {
-                tx.try_partial_sign(&[fee_payer.clone()], recent_blockhash)?;
+        let all_signers = if let Some(fee_payer) = config.fee_payer.as_ref() {
+            let mut all_signers: Vec<Arc<Keypair>> = config.signers.clone();
+            if !all_signers.iter().any(|signer| signer.pubkey() == fee_payer.pubkey()) {
+                all_signers.push(fee_payer.clone());
             }
 
-            legacy_transaction = Some(tx);
-        }
+            all_signers
+        } else {
+            config.signers.clone()
+        };
+
+        // Sign the versioned transaction
+        let signatures: Vec<Signature> = all_signers
+            .iter()
+            .map(|signer| signer.try_sign_message(versioned_message.serialize().as_slice()))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        versioned_transaction = Some(VersionedTransaction {
+            signatures,
+            message: versioned_message,
+        });
 
         // Serialize the transaction
         let serialized_tx: Vec<u8> = if let Some(tx) = &legacy_transaction {
@@ -266,51 +256,35 @@ impl Helius {
         final_instructions.extend(config.instructions.clone());
 
         // Rebuild the transaction with the final instructions
-        if is_versioned {
-            let lookup_tables: &[AddressLookupTableAccount] = config.lookup_tables.as_deref().unwrap();
-            let v0_message: v0::Message =
-                v0::Message::try_compile(&payer_pubkey, &final_instructions, lookup_tables, recent_blockhash)?;
-            let versioned_message: VersionedMessage = VersionedMessage::V0(v0_message);
+        let lookup_tables: &[AddressLookupTableAccount] = config.lookup_tables.as_deref().unwrap();
+        let v0_message: v0::Message =
+            v0::Message::try_compile(&payer_pubkey, &final_instructions, lookup_tables, recent_blockhash)?;
+        let versioned_message: VersionedMessage = VersionedMessage::V0(v0_message);
 
-            let all_signers: Vec<Arc<dyn Signer>> = if let Some(fee_payer) = config.fee_payer.as_ref() {
-                let mut all_signers = config.signers.clone();
-                if !all_signers.iter().any(|signer| signer.pubkey() == fee_payer.pubkey()) {
-                    all_signers.push(fee_payer.clone());
-                }
-                all_signers
-            } else {
-                config.signers.clone()
-            };
-
-            let signatures: Vec<Signature> = all_signers
-                .iter()
-                .map(|signer| signer.try_sign_message(versioned_message.serialize().as_slice()))
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-
-            versioned_transaction = Some(VersionedTransaction {
-                signatures,
-                message: versioned_message,
-            });
-
-            Ok((
-                SmartTransaction::Versioned(versioned_transaction.unwrap()),
-                last_valid_block_hash,
-            ))
-        } else {
-            let mut tx: Transaction = Transaction::new_with_payer(&final_instructions, Some(&payer_pubkey));
-            tx.try_partial_sign(&config.signers, recent_blockhash)?;
-
-            if let Some(fee_payer) = config.fee_payer.as_ref() {
-                tx.try_partial_sign(&[fee_payer.clone()], recent_blockhash)?;
+        let all_signers: Vec<Arc<Keypair>> = if let Some(fee_payer) = config.fee_payer.as_ref() {
+            let mut all_signers = config.signers.clone();
+            if !all_signers.iter().any(|signer| signer.pubkey() == fee_payer.pubkey()) {
+                all_signers.push(fee_payer.clone());
             }
+            all_signers
+        } else {
+            config.signers.clone()
+        };
 
-            legacy_transaction = Some(tx);
+        let signatures: Vec<Signature> = all_signers
+            .iter()
+            .map(|signer| signer.try_sign_message(versioned_message.serialize().as_slice()))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
 
-            Ok((
-                SmartTransaction::Legacy(legacy_transaction.unwrap()),
-                last_valid_block_hash,
-            ))
-        }
+        versioned_transaction = Some(VersionedTransaction {
+            signatures,
+            message: versioned_message,
+        });
+
+        Ok((
+            SmartTransaction::Versioned(versioned_transaction.unwrap()),
+            last_valid_block_hash,
+        ))
     }
 
     /// Builds and sends an optimized transaction, and handles its confirmation status
